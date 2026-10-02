@@ -147,9 +147,7 @@ Append the outcome to the spec's Verification section, replacing the "Still open
 
 ```bash
 git add docs/superpowers/specs/2026-10-02-camera-selection-design.md
-git commit -m "docs: confirm l4t-base r32.7.1 runs nvargus and the USB pipeline
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+git commit -m "docs: confirm l4t-base r32.7.1 runs nvargus and the USB pipeline"
 ```
 
 ---
@@ -266,9 +264,7 @@ The IMX219 delivers 10-bit Bayer that FFmpeg cannot debayer, so the CSI
 path needs nvarguscamerasrc and nvv4l2h264enc. Those only exist on an L4T
 base with the nvidia runtime mounting the Tegra userspace libs.
 
-USB path behaviour is unchanged and verified: h264 640x480 + opus.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+USB path behaviour is unchanged and verified: h264 640x480 + opus."
 ```
 
 ---
@@ -417,9 +413,7 @@ On-demand replaces always-on because a second camera is coming and two
 software encoders will not fit on a Nano. runOnDemandCloseAfter=10s keeps
 a reload or a quick switch-back from re-opening the device.
 
-BREAKING: /cam/whep is now /usb/whep.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+BREAKING: /cam/whep is now /usb/whep."
 ```
 
 ---
@@ -611,9 +605,7 @@ Video only: the C250 mic only streams while its own video interface is
 open, and on-demand means the USB path is idle while this one is live.
 
 CSI_SIZE/FRAMERATE/BITRATE are validated up front, because
-runOnDemandRestart would otherwise turn a typo into a silent restart loop.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+runOnDemandRestart would otherwise turn a typo into a silent restart loop."
 ```
 
 ---
@@ -827,9 +819,7 @@ A stored camera is validated with hasOwnProperty, not truthiness:
 the player on a path that 404s forever.
 
 The stage now takes its aspect ratio from the frame, since the two
-cameras are 4:3 and 16:9.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+cameras are 4:3 and 16:9."
 ```
 
 ---
@@ -923,7 +913,5 @@ docker exec webcam_home sh /smoke.sh usb csi
 
 ```bash
 git add README.md
-git commit -m "docs: document both camera paths and on-demand capture
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+git commit -m "docs: document both camera paths and on-demand capture"
 ```
