@@ -250,10 +250,24 @@ only.
    The capture command used, for reference:
    `gst-launch-1.0 -e nvarguscamerasrc num-buffers=60 sensor-id=0 ! "video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1,format=NV12" ! nvv4l2h264enc insert-sps-pps=1 idrinterval=30 bitrate=4000000 control-rate=1 profile=0 ! h264parse ! matroskamux ! filesink location=/tmp/csi.mkv`
 
-   Still open, and the first task of the implementation plan: repeat it *inside*
-   `nvcr.io/nvidia/l4t-base:r32.7.1` with `/tmp/argus_socket` bind-mounted, and
-   confirm bionic's FFmpeg still drives the USB pipeline. `ports.ubuntu.com`
-   still serves bionic arm64 (verified HTTP 200), so apt works on that base.
+   **Container probe — done 2026-10-02, PASSED.** Repeated inside
+   `nvcr.io/nvidia/l4t-base:r32.7.1` (635 MB) with `/tmp/argus_socket`
+   bind-mounted and `--runtime nvidia`:
+
+   | Checked | Result |
+   |---|---|
+   | `ports.ubuntu.com` bionic arm64 | HTTP 200 — apt works on this base |
+   | `nvarguscamerasrc`, `nvv4l2h264enc`, `rtspclientsink` in-container | all resolve |
+   | Package providing `rtspclientsink` | `gstreamer1.0-rtsp`, as planned — no substitution needed |
+   | CSI capture in-container, 30 frames at 1280x720 | 516305 bytes, clean EOS |
+   | FFmpeg on this base | 3.4.11-0ubuntu0.1 |
+   | `video4linux2` demuxer, `rtsp` muxer, `libopus`, `libx264` | all present |
+   | Baseline/yuv420p encode | OK |
+
+   The single-container shape is therefore viable, which is what makes
+   on-demand possible. Live USB capture through bionic's FFmpeg is proven by
+   deploying the real pipeline rather than in a throwaway container, because the
+   always-on container holds `/dev/video1` open.
 2. **`smoke.sh`, the one kept check.** Runs in-container, `ffprobe`s
    `rtsp://127.0.0.1:8554/usb` and `rtsp://127.0.0.1:8554/csi`, and asserts a
    video stream on each. It fails if a path name, a capture pipeline, or

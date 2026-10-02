@@ -25,11 +25,24 @@ webrtcLocalUDPAddress: :8189
 # No STUN/TURN needed: LAN is direct, Tailscale is already a direct overlay.
 
 paths:
-  # The one camera stream, reachable at: http://<host>:8889/cam/whep
-  cam:
-    # Start the capture pipeline as soon as MediaMTX boots and keep it
-    # running for the lifetime of the server. The USB device is opened
-    # exactly once — clients attaching/detaching never restart FFmpeg.
-    runOnInit: sh /start-ffmpeg.sh
-    # If FFmpeg ever exits (camera glitch, USB hiccup), restart it.
-    runOnInitRestart: yes
+  # The USB Logitech C250: video + audio. Reachable at
+  # http://<host>:8889/usb/whep
+  usb:
+    # On-demand, not runOnInit: with two cameras, always-on would mean two
+    # encoders on a Nano. The pipeline starts when a viewer attaches and
+    # lingers for runOnDemandCloseAfter, so a page reload or a switch away and
+    # straight back reuses it instead of re-opening the USB device.
+    runOnDemand: sh /start-ffmpeg.sh
+    runOnDemandRestart: yes
+    # Longer than the 10s default: v4l2 open plus the first keyframe.
+    runOnDemandStartTimeout: 15s
+    runOnDemandCloseAfter: 10s
+
+  # The onboard CSI camera (IMX219), video only. Reachable at
+  # http://<host>:8889/csi/whep
+  csi:
+    runOnDemand: sh /start-csi.sh
+    runOnDemandRestart: yes
+    # argus init is slower than v4l2 open.
+    runOnDemandStartTimeout: 15s
+    runOnDemandCloseAfter: 10s
