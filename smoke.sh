@@ -14,6 +14,11 @@ PATHS="${*:-usb csi}"
 RTSP_BASE="rtsp://127.0.0.1:8554"
 # Generous: argus init plus the first keyframe is slower than FFmpeg's start.
 TIMEOUT="${SMOKE_TIMEOUT:-30}"
+# Paths that must publish video and NOTHING else. The CSI camera has no mic,
+# and it must never open the C250's — doing so would hold the USB device open
+# from the CSI pipeline and defeat the on-demand isolation. Settable so this
+# rule is testable against a path that does carry audio.
+VIDEO_ONLY="${SMOKE_VIDEO_ONLY:-csi}"
 
 rc=0
 for p in ${PATHS}; do
@@ -23,6 +28,11 @@ for p in ${PATHS}; do
              -of default=nw=1:nk=1 \
              "${RTSP_BASE}/${p}" 2>&1)"
     if echo "${out}" | grep -qx 'video'; then
+        if echo " ${VIDEO_ONLY} " | grep -q " ${p} " && echo "${out}" | grep -qx 'audio'; then
+            echo "FAIL  [$(echo "${out}" | tr '\n' ' ')] — audio on a video-only path"
+            rc=1
+            continue
+        fi
         echo "OK  [$(echo "${out}" | tr '\n' ' ')]"
     else
         echo "FAIL"

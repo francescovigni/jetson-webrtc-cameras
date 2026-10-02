@@ -23,10 +23,13 @@ IMX219 ─(host nvargus-daemon, /tmp/argus_socket)─┐ │                   �
 
 - **On-demand capture:** each camera has its own MediaMTX path with
   `runOnDemand`, so a camera is opened only while someone is watching it and
-  **only one encoder runs** in the normal case. `runOnDemandCloseAfter: 10s`
-  means a page reload, or switching away and straight back, reuses the live
-  pipeline instead of re-opening the device. If a pipeline dies, MediaMTX
-  restarts it (`runOnDemandRestart`).
+  **only one encoder runs** while you sit on one camera. `runOnDemandCloseAfter:
+  10s` means a page reload, or switching away and straight back, reuses the live
+  pipeline instead of re-opening the device — the flip side being that for those
+  10s after a switch the previous camera's pipeline is still up. The player
+  `DELETE`s its WHEP session on switch and on page unload, so that 10s is the
+  configured linger and not an ICE timeout on top of it. If a pipeline dies,
+  MediaMTX restarts it (`runOnDemandRestart`).
 - **Two capture backends, on purpose:** the C250 is plain v4l2 into software
   x264 — cheap enough at VGA. The IMX219 cannot be: on JetPack 4.x it delivers
   10-bit Bayer (`RG10`) that FFmpeg cannot debayer and for which FFmpeg has no
@@ -203,6 +206,16 @@ reports `FAIL` tells you which camera to chase.
     mode. Use one from the table below.
   - `/tmp/argus_socket` missing, or `systemctl is-active nvargus-daemon` not
     `active`, on the **host**. The USB camera is unaffected by either.
+  - **You restarted `nvargus-daemon` on the host.** That replaces the socket's
+    inode, and a single-file bind mount cannot follow it — the container is left
+    holding the old one. Restart the container too:
+    `docker restart webcam_home`.
+
+  Also worth checking once after a host reboot: `ls -l /tmp/argus_socket` should
+  be a socket (`s` in the mode). If Docker started before `nvargus-daemon`
+  created it, Docker will have made a *directory* at that path, which stops the
+  daemon binding and takes the CSI camera down host-wide until the directory is
+  removed.
 
   Verify the whole chain on the host, outside Docker, to split host from
   container:
@@ -238,14 +251,16 @@ All via `environment:` in `docker-compose.yml`.
 | `CSI_FRAMERATE` | 30        | Capped by the sensor mode above                              |
 | `CSI_BITRATE`   | 4000000   | **Bits per second as an integer.** `nvv4l2h264enc` rejects `4M`. |
 
-All four are validated at startup: a malformed value exits with a readable
-message instead of a GStreamer caps error on a restart loop.
+All four are validated at startup — width and height separately, so `1280x`
+and `x720` are rejected rather than reaching GStreamer as `height=` — along with
+the presence of the argus socket. A bad value exits with a readable message
+instead of a caps error on a restart loop.
 
 ### CPU cost
 
-Only the camera being watched encodes, so normally one encoder runs. The
-exception is two viewers on *different* cameras at once, when the software x264
-encoder and the hardware CSI encoder run together. Measured on this 4-core Nano:
+Only the camera being watched encodes, so normally one encoder runs. Both run
+together in two cases: two viewers on *different* cameras, and for up to 10s
+after a switch while the previous pipeline lingers. Measured on this 4-core Nano:
 
 | State | Load average | USB x264 | CSI hw encode |
 |---|---|---|---|

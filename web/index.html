@@ -111,6 +111,7 @@
     let pc = null;
     let generation = 0;        // invalidates stale callbacks after teardown
     let retryTimer = null;
+    let whepResource = null;   // WHEP session URL, so teardown can DELETE it
 
     function setStatus(text, state) {
       statusEl.textContent = text;
@@ -123,9 +124,23 @@
       }
     }
 
+    // Tell MediaMTX a WHEP session is finished. Closing the peer connection is
+    // not enough: MediaMTX only drops the reader once ICE reaches disconnected
+    // (~5-6s observed), and runOnDemandCloseAfter's 10s only starts counting
+    // after that — so without this, switching cameras left the previous
+    // camera's encoder running ~16s alongside the new one, from a single
+    // viewer. That is the thing on-demand exists to prevent.
+    // keepalive so the request still goes out when the page is unloading.
+    function releaseSession(resource) {
+      if (!resource) return;
+      fetch(resource, { method: "DELETE", keepalive: true }).catch(() => {});
+    }
+
     function teardown() {
       generation++;            // any in-flight handlers become no-ops
       if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      releaseSession(whepResource);
+      whepResource = null;
       if (pc) { try { pc.close(); } catch (_) {} pc = null; }
       video.srcObject = null;
     }
@@ -186,15 +201,27 @@
         await waitForIceGathering(pc);
         if (myGen !== generation) return;
 
-        const res = await fetch(whepUrl(), {
+        const url = whepUrl();
+        const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/sdp" },
           body: pc.localDescription.sdp,
         });
         if (!res.ok) throw new Error(`WHEP ${res.status}`);
 
+        // MediaMTX returns the session resource in Location, and exposes that
+        // header cross-origin (the page is :8080, WHEP is :8889).
+        const loc = res.headers.get("Location");
+        const resource = loc ? new URL(loc, url).href : null;
+
         const answer = await res.text();
-        if (myGen !== generation) return;
+        if (myGen !== generation) {
+          // Superseded mid-handshake: this session is already orphaned, and
+          // teardown() could not have known its URL yet. Release it here.
+          releaseSession(resource);
+          return;
+        }
+        whepResource = resource;
         await pc.setRemoteDescription({ type: "answer", sdp: answer });
       } catch (err) {
         if (myGen !== generation) return;
@@ -233,6 +260,10 @@
     });
 
     document.getElementById("reconnect").addEventListener("click", connect);
+
+    // Closing or navigating away should release the camera immediately too,
+    // rather than waiting out the ICE timeout.
+    window.addEventListener("pagehide", () => { releaseSession(whepResource); whepResource = null; });
 
     // Re-establish promptly when the tab becomes visible again.
     document.addEventListener("visibilitychange", () => {
