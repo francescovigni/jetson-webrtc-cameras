@@ -1,7 +1,10 @@
 # Jetson Nano is arm64. We use a plain Debian arm64 base and do CPU-based
 # H264 encoding (the C250 is only VGA/MJPEG, so software x264 is plenty and
 # avoids dragging the L4T/GStreamer HW-encode stack onto JetPack 4.x).
-FROM arm64v8/debian:bullseye-slim
+# bookworm, not bullseye: Debian 11 LTS ended 2026-08-31 and its .deb pool is
+# gone from both deb.debian.org and archive.debian.org, so bullseye no longer
+# builds at all. bookworm ships ffmpeg 5.1 — same features this pipeline uses.
+FROM arm64v8/debian:bookworm-slim
 
 # Pin MediaMTX so builds are reproducible. arm64v8 asset.
 ARG MEDIAMTX_VERSION=v1.9.3
