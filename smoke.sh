@@ -1,45 +1,67 @@
 #!/bin/sh
-# Smoke check: every MediaMTX path named on the command line must publish a
-# video stream. Defaults to both cameras.
+# Smoke check: every camera backend must publish a video stream, and a backend
+# that declares no audio must not publish one.
 #
-#   docker exec webcam_home sh /smoke.sh          # usb and csi
-#   docker exec webcam_home sh /smoke.sh usb      # just the USB camera
+#   docker exec webcam_home sh /smoke.sh          # every backend in /cameras.d
+#   docker exec webcam_home sh /smoke.sh usb      # just one
 #
-# Because the paths are runOnDemand, connecting IS the test: it forces
-# MediaMTX to spawn the capture pipeline. Exits non-zero on the first path
-# that does not come up.
+# Both the list of cameras and the audio expectation come from /cameras.d, so
+# adding a backend extends this check automatically — nothing here to edit.
+#
+# Because the paths are runOnDemand, connecting IS the test: it forces MediaMTX
+# to spawn the capture pipeline.
 set -u
 
-PATHS="${*:-usb csi}"
-RTSP_BASE="rtsp://127.0.0.1:8554"
+CAMERA_DIR="${CAMERA_DIR:-/cameras.d}"
+RTSP_BASE="${RTSP_BASE:-rtsp://127.0.0.1:8554}"
 # Generous: argus init plus the first keyframe is slower than FFmpeg's start.
 TIMEOUT="${SMOKE_TIMEOUT:-30}"
-# Paths that must publish video and NOTHING else. The CSI camera has no mic,
-# and it must never open the C250's — doing so would hold the USB device open
-# from the CSI pipeline and defeat the on-demand isolation. Settable so this
-# rule is testable against a path that does carry audio.
-VIDEO_ONLY="${SMOKE_VIDEO_ONLY:-csi}"
+
+# Default to every backend present, in the same order MediaMTX configured them.
+if [ "$#" -gt 0 ]; then
+    PATHS="$*"
+else
+    PATHS=""
+    for s in "${CAMERA_DIR}"/*.sh; do
+        [ -f "${s}" ] && PATHS="${PATHS} $(basename "${s}" .sh)"
+    done
+fi
+[ -n "${PATHS# }" ] || { echo "smoke: no camera backends found in ${CAMERA_DIR}" >&2; exit 2; }
+
+# Does this backend declare audio? Unknown backends are not constrained.
+declares_audio() {
+    f="${CAMERA_DIR}/$1.sh"
+    [ -f "${f}" ] || return 0
+    case "$(sed -n 's/^# *camera-audio: *//p' "${f}" | head -n1)" in
+        yes|true|1) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
 
 rc=0
 for p in ${PATHS}; do
-    printf '%-4s ' "${p}"
+    printf '%-6s ' "${p}"
     out="$(timeout "${TIMEOUT}" ffprobe -v error -rtsp_transport tcp \
              -show_entries stream=codec_type \
              -of default=nw=1:nk=1 \
              "${RTSP_BASE}/${p}" 2>&1)"
-    if echo "${out}" | grep -qx 'video'; then
-        if echo " ${VIDEO_ONLY} " | grep -q " ${p} " && echo "${out}" | grep -qx 'audio'; then
-            echo "FAIL  [$(echo "${out}" | tr '\n' ' ')] — audio on a video-only path"
-            rc=1
-            continue
-        fi
-        echo "OK  [$(echo "${out}" | tr '\n' ' ')]"
-    else
-        echo "FAIL"
-        echo "${out}" | head -3 | sed 's/^/       /'
+    tracks="$(echo "${out}" | tr '\n' ' ')"
+
+    if ! echo "${out}" | grep -qx 'video'; then
+        echo "FAIL  no video"
+        echo "${out}" | head -3 | sed 's/^/         /'
         rc=1
+        continue
     fi
+    # A video-only backend must never open an audio device. On this hardware
+    # that would also mean holding the USB camera open from another pipeline.
+    if ! declares_audio "${p}" && echo "${out}" | grep -qx 'audio'; then
+        echo "FAIL  [${tracks}] — audio on a backend that declares camera-audio: no"
+        rc=1
+        continue
+    fi
+    echo "OK    [${tracks}]"
 done
 
-[ "${rc}" -eq 0 ] && echo "smoke: all paths OK"
+[ "${rc}" -eq 0 ] && echo "smoke: all backends OK"
 exit "${rc}"

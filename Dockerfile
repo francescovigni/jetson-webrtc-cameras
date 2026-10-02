@@ -38,14 +38,16 @@ RUN wget -qO /tmp/mediamtx.tgz \
     && rm /tmp/mediamtx.tgz \
     && chmod +x /usr/local/bin/mediamtx
 
-COPY mediamtx.yml    /etc/mediamtx.yml
-COPY start-ffmpeg.sh /start-ffmpeg.sh
-COPY start-csi.sh    /start-csi.sh
+# The base config carries everything but `paths:`; entrypoint.sh generates that
+# from /cameras.d/ at startup, so adding a camera touches neither this file nor
+# mediamtx.yml.
+COPY mediamtx.yml    /etc/mediamtx.base.yml
+COPY cameras.d/      /cameras.d/
 COPY smoke.sh        /smoke.sh
 COPY entrypoint.sh   /entrypoint.sh
 COPY web/            /web/
 
-RUN chmod +x /start-ffmpeg.sh /start-csi.sh /smoke.sh /entrypoint.sh
+RUN chmod +x /cameras.d/*.sh /smoke.sh /entrypoint.sh
 
 # 8080 = frontend page, 8889 = WebRTC/WHEP signalling+media (TCP),
 # 8189/udp = WebRTC ICE/media.

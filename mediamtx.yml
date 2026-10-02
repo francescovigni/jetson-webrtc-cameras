@@ -24,25 +24,7 @@ webrtcLocalUDPAddress: :8189
 # Gather host candidates from all interfaces (LAN + Tailscale) automatically.
 # No STUN/TURN needed: LAN is direct, Tailscale is already a direct overlay.
 
-paths:
-  # The USB Logitech C250: video + audio. Reachable at
-  # http://<host>:8889/usb/whep
-  usb:
-    # On-demand, not runOnInit: with two cameras, always-on would mean two
-    # encoders on a Nano. The pipeline starts when a viewer attaches and
-    # lingers for runOnDemandCloseAfter, so a page reload or a switch away and
-    # straight back reuses it instead of re-opening the USB device.
-    runOnDemand: sh /start-ffmpeg.sh
-    runOnDemandRestart: yes
-    # Longer than the 10s default: v4l2 open plus the first keyframe.
-    runOnDemandStartTimeout: 15s
-    runOnDemandCloseAfter: 10s
-
-  # The onboard CSI camera (IMX219), video only. Reachable at
-  # http://<host>:8889/csi/whep
-  csi:
-    runOnDemand: sh /start-csi.sh
-    runOnDemandRestart: yes
-    # argus init is slower than v4l2 open.
-    runOnDemandStartTimeout: 15s
-    runOnDemandCloseAfter: 10s
+# NOTE: no `paths:` block here on purpose. entrypoint.sh appends one generated
+# from /cameras.d/, so adding a camera never means editing this file. The
+# assembled config is written to /etc/mediamtx.yml — inspect it with:
+#   docker exec webcam_home cat /etc/mediamtx.yml

@@ -12,11 +12,15 @@
     return ok;
   };
 
-  // 1. The selector exists and offers exactly the two cameras.
+  // 1. The selector offers exactly the cameras the container generated. Both
+  //    sides come from cameras.json, so this holds for any set of backends.
   const sel = document.getElementById("cam");
+  const configured = Object.keys(window.__CAMS || {});
   check("selector present", !!sel, true);
-  check("option count", sel ? sel.options.length : 0, 2);
-  check("option values", sel ? [...sel.options].map(o => o.value).join(",") : "", "usb,csi");
+  check("at least one camera configured", configured.length > 0, true);
+  check("option count matches cameras.json", sel ? sel.options.length : 0, configured.length);
+  check("option values match cameras.json",
+        sel ? [...sel.options].map(o => o.value).join(",") : "", configured.join(","));
 
   // 2. The selector reflects the camera actually being played.
   check("selector matches active camera", sel ? sel.value : "", window.__activeCam);
@@ -28,11 +32,14 @@
   if (typeof window.__resolveCam !== "function") {
     results.push("FAIL  resolver exposed: window.__resolveCam is not a function");
   } else {
-    for (const bad of ["cam", "", null, "constructor", "toString", "__proto__", "USB", "csi "]) {
-      check(`rejects stored ${JSON.stringify(bad)}`, window.__resolveCam(bad), "usb");
+    // The fallback is whatever the container put first in cameras.json.
+    const fallback = configured[0];
+    for (const bad of ["cam", "", null, "constructor", "toString", "__proto__",
+                       "nosuchcamera", (configured[0] || "x") + " "]) {
+      check(`rejects stored ${JSON.stringify(bad)}`, window.__resolveCam(bad), fallback);
     }
-    // ...and a real camera must survive it.
-    for (const good of ["usb", "csi"]) {
+    // ...and every configured camera must survive it.
+    for (const good of configured) {
       check(`accepts stored ${JSON.stringify(good)}`, window.__resolveCam(good), good);
     }
   }

@@ -1,6 +1,9 @@
 #!/bin/sh
+# camera-label: USB — C250 (with mic)
+# camera-audio: yes
+#
 # Builds and runs the FFmpeg capture pipeline that publishes the C250 into
-# MediaMTX. Invoked by MediaMTX via runOnInit (and re-invoked on restart),
+# MediaMTX. Invoked by MediaMTX via runOnDemand (and re-invoked on restart),
 # so devices are re-detected on every (re)start — robust to USB re-plug.
 set -u
 
@@ -13,7 +16,7 @@ AUDIO_RATE="${AUDIO_RATE:-16000}"     # C250 mic supports 16000-48000 mono
 # Pixel format from the camera. Empty = let v4l2 negotiate the native format.
 # The C250 supports "mjpeg" at 640x480 (set via compose).
 INPUT_FORMAT="${INPUT_FORMAT:-}"
-RTSP_URL="rtsp://127.0.0.1:8554/${MTX_PATH:-cam}"
+RTSP_URL="rtsp://127.0.0.1:8554/${MTX_PATH:-usb}"
 
 # --- choose the audio capture card -----------------------------------------
 # Pick the USB audio card by NAME. We deliberately do NOT probe it in

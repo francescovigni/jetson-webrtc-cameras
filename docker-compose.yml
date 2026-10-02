@@ -53,6 +53,10 @@ services:
       # Uncomment to pin a specific ALSA capture card (see README):
       # - AUDIO_CARD=2
 
+      # Which camera the player opens on by default. Must match a filename in
+      # cameras.d/ without the .sh.
+      - DEFAULT_CAMERA=usb
+
       # --- CSI camera (onboard IMX219), video only ---
       # CSI_SIZE must be a real sensor mode: 3264x2464@21, 1920x1080@30,
       # 1640x1232@30 (native 4:3), 1280x720@60.
