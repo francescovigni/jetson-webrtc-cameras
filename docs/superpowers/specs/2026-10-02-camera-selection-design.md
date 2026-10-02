@@ -235,12 +235,25 @@ only.
 
 ## Verification
 
-1. **Host probe, throwaway, before any repo change.** Over ssh:
-   `cat /etc/nv_tegra_release` to fix the L4T tag, then
-   `gst-launch-1.0 -e nvarguscamerasrc num-buffers=30 ! nvvidconv ! nvv4l2h264enc ! h264parse ! matroskamux ! filesink location=/tmp/csi.mkv`.
-   A non-empty, playable file proves sensor, ISP and hardware encoder before
-   anything is committed. Also confirm FFmpeg 3.4 on the L4T base still drives
-   the USB pipeline.
+1. **Host probe — done 2026-10-02 on `nvidia@bart`, PASSED.** Findings, which
+   the rest of this spec now assumes rather than guesses:
+
+   | Checked | Result |
+   |---|---|
+   | `/etc/nv_tegra_release` | R32, revision 7.6 → `l4t-base:r32.7.1` is the matching tag |
+   | `/dev/video0`, `/dev/video1` | both present |
+   | `/tmp/argus_socket`, `nvargus-daemon` | socket present, service active |
+   | `nvarguscamerasrc`, `nvv4l2h264enc` on host | both resolve |
+   | Docker default runtime | already `nvidia` — the compose `runtime:` line is free |
+   | 60-frame CSI capture at 1280x720@30, HW-encoded | 977 KB written, clean EOS |
+
+   The capture command used, for reference:
+   `gst-launch-1.0 -e nvarguscamerasrc num-buffers=60 sensor-id=0 ! "video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1,format=NV12" ! nvv4l2h264enc insert-sps-pps=1 idrinterval=30 bitrate=4000000 control-rate=1 profile=0 ! h264parse ! matroskamux ! filesink location=/tmp/csi.mkv`
+
+   Still open, and the first task of the implementation plan: repeat it *inside*
+   `nvcr.io/nvidia/l4t-base:r32.7.1` with `/tmp/argus_socket` bind-mounted, and
+   confirm bionic's FFmpeg still drives the USB pipeline. `ports.ubuntu.com`
+   still serves bionic arm64 (verified HTTP 200), so apt works on that base.
 2. **`smoke.sh`, the one kept check.** Runs in-container, `ffprobe`s
    `rtsp://127.0.0.1:8554/usb` and `rtsp://127.0.0.1:8554/csi`, and asserts a
    video stream on each. It fails if a path name, a capture pipeline, or
@@ -250,10 +263,17 @@ only.
 
 ## Risks
 
-- The L4T base tag must match the host L4T release; a mismatch breaks the
-  nvidia runtime's library mounts.
-- FFmpeg 3.4 on bionic drives the USB path. Expected fine, confirmed by probe.
-- Argus socket permissions may need more than `group_add: video`.
+- ~~The L4T base tag must match the host L4T release.~~ Retired: host is
+  R32.7.6, `l4t-base:r32.7.1` is the matching R32.7 tag.
+- FFmpeg 3.4 on bionic drives the USB path. Still unverified — first plan task.
+- Argus socket permissions may need more than `group_add: video`. Unverified
+  inside a container; the socket is `srwxrwxrwx` on the host, which suggests
+  not.
+- Base-image churn: the pre-L4T state was moved from `bullseye-slim` to
+  `bookworm-slim` on 2026-10-02 because Debian 11 LTS ended 2026-08-31 and its
+  .deb pool is gone from deb.debian.org *and* archive.debian.org. That fix only
+  matters until the L4T migration lands, but it keeps the current stream
+  deployable and the deploy loop verifiable in the meantime.
 - On-demand replaces an always-on design the README credits for stability.
   `runOnDemandCloseAfter` is the mitigation; if device re-open turns out to be
   flaky in practice, the fallback is always-on for USB and on-demand for CSI
