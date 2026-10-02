@@ -37,7 +37,7 @@ if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -p "$SSH_PORT" \
   exit 1
 fi
 
-FILES=(Dockerfile docker-compose.yml mediamtx.yml entrypoint.sh start-ffmpeg.sh smoke.sh web README.md)
+FILES=(Dockerfile docker-compose.yml mediamtx.yml entrypoint.sh start-ffmpeg.sh start-csi.sh smoke.sh web README.md)
 
 echo ">> [1/3] Ensuring remote dir: ${REMOTE_DIR}"
 "${SSH[@]}" "mkdir -p '${REMOTE_DIR}'"

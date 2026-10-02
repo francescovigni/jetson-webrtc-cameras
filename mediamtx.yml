@@ -37,3 +37,12 @@ paths:
     # Longer than the 10s default: v4l2 open plus the first keyframe.
     runOnDemandStartTimeout: 15s
     runOnDemandCloseAfter: 10s
+
+  # The onboard CSI camera (IMX219), video only. Reachable at
+  # http://<host>:8889/csi/whep
+  csi:
+    runOnDemand: sh /start-csi.sh
+    runOnDemandRestart: yes
+    # argus init is slower than v4l2 open.
+    runOnDemandStartTimeout: 15s
+    runOnDemandCloseAfter: 10s

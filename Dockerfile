@@ -40,11 +40,12 @@ RUN wget -qO /tmp/mediamtx.tgz \
 
 COPY mediamtx.yml    /etc/mediamtx.yml
 COPY start-ffmpeg.sh /start-ffmpeg.sh
+COPY start-csi.sh    /start-csi.sh
 COPY smoke.sh        /smoke.sh
 COPY entrypoint.sh   /entrypoint.sh
 COPY web/            /web/
 
-RUN chmod +x /start-ffmpeg.sh /smoke.sh /entrypoint.sh
+RUN chmod +x /start-ffmpeg.sh /start-csi.sh /smoke.sh /entrypoint.sh
 
 # 8080 = frontend page, 8889 = WebRTC/WHEP signalling+media (TCP),
 # 8189/udp = WebRTC ICE/media.
