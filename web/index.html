@@ -64,10 +64,14 @@
   <script>
     // WHEP endpoint is derived from whatever host you browsed to (LAN IP or
     // Tailscale name), so the same page works on both without editing.
-    // Two physically fixed cameras on this Jetson, so they are hardcoded — no
-    // discovery endpoint, and MediaMTX's API stays disabled.
-    const CAMS = { usb: "USB — C250 (with mic)", csi: "CSI — IMX219 (video only)" };
-    const DEFAULT_CAM = "usb";
+    // The camera list is generated from /cameras.d at container start, so adding
+    // a backend needs no edit here. MediaMTX's own API stays disabled; this is a
+    // static file, not a control endpoint.
+    // Populated in place, never reassigned: window.__CAMS below aliases this
+    // object, and the self-check reads it after the list has loaded.
+    const CAMS = {};        // path -> label
+    let DEFAULT_CAM = null; // the container's DEFAULT_CAMERA, first in the file
+    let cam = null;
 
     // hasOwnProperty, not `CAMS[stored]`: a stored value of "constructor" or
     // "toString" is truthy on any object and would strand the player on a path
@@ -76,10 +80,18 @@
       return Object.prototype.hasOwnProperty.call(CAMS, stored) ? stored : DEFAULT_CAM;
     }
 
-    // localStorage can throw outright in a private window, so guard every access.
-    let storedCam = null;
-    try { storedCam = localStorage.getItem("cam"); } catch (_) {}
-    let cam = resolveCam(storedCam);
+    async function loadCameras() {
+      const res = await fetch("cameras.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(`cameras.json ${res.status}`);
+      const list = await res.json();
+      if (!Array.isArray(list) || list.length === 0) throw new Error("no cameras configured");
+      for (const c of list) CAMS[c.path] = c.label || c.path;
+      DEFAULT_CAM = list[0].path;
+      // localStorage can throw outright in a private window, so guard every access.
+      let storedCam = null;
+      try { storedCam = localStorage.getItem("cam"); } catch (_) {}
+      cam = resolveCam(storedCam);
+    }
 
     // Derived per connect(), not once: the camera changes at runtime. The host
     // still comes from the page URL, so LAN and Tailscale both keep working.
@@ -231,9 +243,6 @@
     }
 
     const camSel = document.getElementById("cam");
-    for (const [value, label] of Object.entries(CAMS)) {
-      camSel.add(new Option(label, value, false, value === cam));
-    }
 
     camSel.addEventListener("change", () => {
       cam = camSel.value;
@@ -270,7 +279,22 @@
       if (!document.hidden && (!pc || pc.connectionState !== "connected")) connect();
     });
 
-    connect();
+    // Nothing can connect until we know what the cameras are. A failure here is
+    // a deployment fault, not a stream fault, so say so plainly instead of
+    // dropping into the reconnect loop that would never succeed.
+    (async () => {
+      try {
+        await loadCameras();
+      } catch (err) {
+        setStatus(`Camera list unavailable (${err.message})`, "down");
+        camSel.disabled = true;
+        return;
+      }
+      for (const [value, label] of Object.entries(CAMS)) {
+        camSel.add(new Option(label, value, false, value === cam));
+      }
+      connect();
+    })();
   </script>
 </body>
 </html>

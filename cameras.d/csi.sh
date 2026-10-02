@@ -1,4 +1,7 @@
 #!/bin/sh
+# camera-label: CSI — IMX219 (video only)
+# camera-audio: no
+#
 # Publishes the Jetson's onboard CSI camera (IMX219) into MediaMTX. Invoked by
 # MediaMTX via runOnDemand, so the sensor is opened only while someone is
 # watching and re-detected on every restart.

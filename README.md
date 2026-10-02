@@ -1,285 +1,298 @@
-# Webcam Home — Jetson Nano WebRTC streamer
+# jetson-webrtc-cameras
 
-Streams either of the Jetson Nano's two cameras over **WebRTC** to a simple web
-page, switchable from a dropdown in the browser:
+Low-latency WebRTC streaming from **multiple camera backends** on an NVIDIA
+Jetson Nano, switchable from a dropdown in the browser. One Docker container:
+MediaMTX + FFmpeg + GStreamer + a static page.
 
-- the USB Logitech C250 (`046d:0804`) — **video + audio**
-- the onboard CSI IMX219 — **video only**
+Adding a camera means dropping one script into `cameras.d/`. Nothing else is
+edited — not the MediaMTX config, not the Dockerfile, not the player.
 
-One Docker container: MediaMTX + FFmpeg + GStreamer + a static frontend.
+```
+┌─ cameras.d/usb.sh   ── FFmpeg, v4l2 → x264 + Opus ──┐
+│                                                     │
+├─ cameras.d/csi.sh   ── GStreamer, Tegra ISP → NVENC ┤──► MediaMTX ──► WHEP ──► browser
+│                                                     │                  (WebRTC)
+└─ cameras.d/test.sh  ── FFmpeg, test pattern ────────┘
+       │
+       └─ entrypoint.sh reads this directory and generates both the MediaMTX
+          `paths:` block and the cameras.json the player fetches.
+```
+
+## Why more than one backend
+
+Not architecture for its own sake — the hardware forces it.
+
+The USB webcam is ordinary: `v4l2` into software x264 is cheap enough at VGA.
+The Jetson's **onboard CSI camera cannot be done that way at all.** On JetPack
+4.x the IMX219 presents 10-bit Bayer (`RG10`) on `/dev/video0`, which FFmpeg
+cannot debayer, and there is no ISP anywhere in the FFmpeg path. It has to go
+through GStreamer's `nvarguscamerasrc`, which reaches the sensor via
+`nvargus-daemon` and the Tegra ISP, and `nvv4l2h264enc`, which encodes in
+hardware.
+
+So the two cameras need two genuinely different capture stacks, and the useful
+question becomes: what is the smallest contract both can satisfy? That contract
+is this project.
+
+Measured on a 4-core Nano, which is why it matters:
+
+| | Load average | Encoder cost |
+|---|---|---|
+| Idle, nobody watching | 0.34 | — |
+| USB camera (software x264) | — | 66.3% of a core |
+| CSI camera (hardware NVENC) | — | 10.9% of a core |
+| A viewer on each at once | 1.07 | both of the above |
+
+Only the camera being watched encodes. That is what makes two cameras fit.
+
+## Add a camera backend
+
+A backend is any executable in `cameras.d/`. Its filename without `.sh` is the
+MediaMTX path name, so `cameras.d/front-door.sh` is served at
+`http://<host>:8889/front-door/whep` and appears in the dropdown.
+
+Three rules:
+
+1. **Publish H264 to `rtsp://127.0.0.1:8554/${MTX_PATH}`.** MediaMTX exports
+   `MTX_PATH`, and it always equals your filename without `.sh`.
+2. **Stay in the foreground while streaming.** MediaMTX starts you when a viewer
+   attaches and signals your process group on teardown, so `exec` your pipeline
+   rather than backgrounding it — otherwise something is left holding the device.
+3. **Exit non-zero, with a message, if your configuration is unusable.**
+   `runOnDemandRestart` turns a silent failure into a restart loop.
+
+Two comment headers carry presentation:
+
+```sh
+#!/bin/sh
+# camera-label: Front door (RTSP)
+# camera-audio: no
+set -u
+exec ffmpeg -hide_banner -loglevel warning \
+    -rtsp_transport tcp -i "rtsp://user:pass@192.168.1.42/stream1" \
+    -c:v copy -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/${MTX_PATH}"
+```
+
+Drop that in `cameras.d/`, redeploy, done. `cameras.d/test.sh` is the reference
+implementation — it generates a test pattern, so it also works as a plumbing
+check on a box whose camera is unplugged or not there yet.
+
+`camera-audio` is not cosmetic: `smoke.sh` enforces it. A backend declaring
+`no` that publishes an audio track fails the check.
+
+## Cameras in this deployment
+
+| Camera | Backend | Endpoint | Audio |
+|---|---|---|---|
+| USB Logitech C250 (`046d:0804`) | `cameras.d/usb.sh` | `:8889/usb/whep` | yes, the C250 mic |
+| Onboard CSI IMX219 | `cameras.d/csi.sh` | `:8889/csi/whep` | no |
+| Test pattern, no hardware | `cameras.d/test.sh` | `:8889/test/whep` | no |
+
+The CSI camera has no microphone, and the C250's cannot stand in for it: that
+mic only delivers samples while the C250's own video interface is open, which it
+is not while another camera is the one being watched.
 
 ## How it works
 
-```
-C250 ──────/dev/video1─┐
-                       ├─► FFmpeg (x264 + Opus) ──┐
-C250 mic ──/dev/snd────┘                          │
-                                                  ├─► MediaMTX ─► WebRTC (WHEP) ─► browser
-IMX219 ─(host nvargus-daemon, /tmp/argus_socket)─┐ │                   │
-        └─► gst nvarguscamerasrc ! nvv4l2h264enc ! rtspclientsink      │
-            (Tegra ISP + hardware H264)                               │
-                                        busybox httpd ──► index.html (:8080)
-```
-
-- **On-demand capture:** each camera has its own MediaMTX path with
-  `runOnDemand`, so a camera is opened only while someone is watching it and
-  **only one encoder runs** while you sit on one camera. `runOnDemandCloseAfter:
-  10s` means a page reload, or switching away and straight back, reuses the live
+- **On-demand capture.** Each backend gets a MediaMTX path with `runOnDemand`,
+  so a camera is opened only while someone is watching it. `runOnDemandCloseAfter`
+  (10s) means a page reload, or switching away and straight back, reuses the live
   pipeline instead of re-opening the device — the flip side being that for those
-  10s after a switch the previous camera's pipeline is still up. The player
-  `DELETE`s its WHEP session on switch and on page unload, so that 10s is the
-  configured linger and not an ICE timeout on top of it. If a pipeline dies,
-  MediaMTX restarts it (`runOnDemandRestart`).
-- **Two capture backends, on purpose:** the C250 is plain v4l2 into software
-  x264 — cheap enough at VGA. The IMX219 cannot be: on JetPack 4.x it delivers
-  10-bit Bayer (`RG10`) that FFmpeg cannot debayer and for which FFmpeg has no
-  ISP, so it goes through GStreamer's `nvarguscamerasrc` (Tegra ISP) and
-  `nvv4l2h264enc` (hardware H264) instead.
-- **Self-healing player:** `index.html` auto-reconnects if its WebRTC link
-  drops, so you can close the tab and reopen freely.
-- **Tailscale-friendly:** one TCP web port (8889) + one UDP port (8189), no
-  multicast. The page derives the WHEP URL from the host you browsed to, so the
-  same page works over LAN IP *or* Tailscale name with no edits.
+  10s after a switch the previous camera is still up.
+- **The player `DELETE`s its WHEP session** on switch and on page unload. Without
+  that, MediaMTX waits out the ICE disconnected timeout (~6s) before dropping the
+  reader, and only then does the 10s linger begin — so one viewer switching camera
+  ran both encoders for 16s.
+- **Self-healing player.** `web/index.html` reconnects if its WebRTC link drops,
+  and switching cameras reuses that machinery: a generation counter invalidates
+  in-flight callbacks, so a switch mid-negotiation is safe.
+- **Tailscale-friendly.** One TCP port for signalling, one UDP port for media, no
+  multicast. The page derives its WHEP URL from the host you browsed to, so the
+  same page works over LAN IP or Tailscale name with no edits.
 
-## Ports
+### Ports
 
-| Port       | Purpose                          |
-|------------|----------------------------------|
-| 8080/tcp   | Frontend page                    |
-| 8889/tcp   | WebRTC signalling (WHEP) + media |
-| 8189/udp   | WebRTC ICE / media               |
+| Port | Purpose |
+|---|---|
+| 8080/tcp | Player page |
+| 8889/tcp | WebRTC signalling (WHEP) + media |
+| 8189/udp | WebRTC ICE / media |
 
-## Cameras
+## Requirements
 
-| Camera | MediaMTX path | WHEP endpoint | Audio |
-|---|---|---|---|
-| USB Logitech C250 | `usb` | `http://<host>:8889/usb/whep` | yes, the C250 mic |
-| Onboard CSI IMX219 | `csi` | `http://<host>:8889/csi/whep` | no |
-
-Switch with the dropdown on the player page; the choice is remembered per
-browser. The stage follows each camera's aspect ratio (the C250 is 4:3, the
-IMX219 at the default mode is 16:9).
-
-**Breaking change:** `/cam/whep` no longer exists. It became `/usb/whep` when
-the second camera was added.
-
-The CSI camera has no microphone, and the C250's mic cannot fill in: it only
-delivers samples while the C250's own video interface is open, which it is not
-while the CSI camera is the one being watched.
+- Jetson Nano on **JetPack 4.x** (developed against L4T **R32.7.6**). The base
+  image is `nvcr.io/nvidia/l4t-base:r32.7.1`; the tag must match your host's L4T
+  series — check with `cat /etc/nv_tegra_release`.
+- Docker with the **nvidia runtime**, which bind-mounts the Tegra userspace libs
+  the CSI backend needs. On JetPack it is usually the default already.
+- `nvargus-daemon` running on the host (default on JetPack) for the CSI camera.
+  The USB and test backends do not need it.
 
 ## Deploy
 
-1. Edit the config block at the top of `script.sh` (or pass via env):
-
-   ```bash
-   JETSON_USER=jetson JETSON_HOST=192.168.1.50 ./script.sh
-   ```
-
-   Use `USE_SUDO=sudo ./script.sh` if Docker on the Jetson needs root.
-
-2. Open **http://<jetson-ip>:8080** (or `http://<tailscale-name>:8080`).
-   Click **Unmute** for audio (browsers block autoplay-with-sound until a click).
-
-## Access over Tailscale
-
-Tailscale runs on the **Jetson host**, and the `webcam` service uses host
-networking — so the stream is already bound to the `tailscale0` interface and
-MediaMTX gathers the `100.x` IP as a WebRTC ICE candidate automatically. Nothing
-to configure in the container.
-
-From any device on your tailnet:
+Deployment is `scp` over SSH plus `docker compose` on the target — no registry,
+no CI. The image is built on the Jetson.
 
 ```bash
-tailscale ip -4         # on the Jetson: get its 100.x.y.z address
+# One time: install your SSH key on the Jetson.
+./script.sh setup-key
+
+# Every deploy after that.
+JETSON_USER=nvidia JETSON_HOST=my-jetson ./script.sh
 ```
 
-Then open **http://<100.x.y.z>:8080** (or **http://<magicdns-name>:8080**). The
-frontend derives its WHEP URL from the host you browsed to, so signalling (8889)
-and media (8189/udp) both flow over the tunnel. LAN access via the local IP keeps
-working unchanged.
+Then open **http://&lt;jetson&gt;:8080**. Click **Unmute** for audio — browsers block
+autoplay with sound until a click.
 
-**If video stays stuck on "Connecting…" over Tailscale** (ICE didn't pick the
-`100.x` candidate), ask for the `webrtcAdditionalHosts` auto-advertise tweak —
-the entrypoint can detect the `tailscale0` IP and hand it to MediaMTX
-explicitly.
+Host and user default to the values at the top of `script.sh`; override via env
+as above.
 
-## Finding the correct ALSA capture device
+## Verify
 
-Audio is **auto-detected by name**: the container picks the **USB** audio card
-(the C250 mic) from `arecord -l`, which skips the Jetson's dummy onboard card
-(`tegra-snd-t210ref`, 10x ADMAIF) that never delivers samples.
-
-> **C250 quirk:** this camera only streams audio while its **video** interface
-> is active — capturing the mic *on its own* returns `Input/output error`.
-> That's why the pipeline captures **video + audio together** and does **not**
-> probe the mic in isolation (an isolated probe would wrongly reject a working
-> mic). If the A/V pipeline fails within 8s (genuinely dead mic), it
-> automatically falls back to **video-only** instead of restart-looping.
-
-To inspect the cards yourself, list them inside the container:
+One command, run on the target. It forces every backend to spawn its pipeline
+and asserts what comes back:
 
 ```bash
-docker run --rm --device /dev/snd --entrypoint arecord webcam_home:latest -l
+docker exec webcam_home sh /smoke.sh          # every backend
+docker exec webcam_home sh /smoke.sh usb csi  # named ones
 ```
 
-Example on this Jetson:
-
 ```
-card 1: tegrasndt210ref [...], device 0: ADMAIF1 ...   <- onboard dummy (no input)
-   ... (ADMAIF1..10) ...
-card 2: U0x46d0x804 [USB Device 0x46d:0x804], device 0: USB Audio  <- the C250 mic
-```
-
-Here the C250 is **card 2** → `plughw:2,0`, and auto-detect picks it because it
-matches `USB` *and* passes the capture probe.
-
-To pin a card explicitly (e.g. multiple USB mics), set it in
-`docker-compose.yml` and redeploy:
-
-```yaml
-    environment:
-      - AUDIO_CARD=2      # the "card N" number of your mic from `arecord -l`
+usb    OK    [video audio ]
+csi    OK    [video ]
+test   OK    [video ]
+smoke: all backends OK
 ```
 
-## Finding the correct video device
+It exits non-zero if a backend publishes no video, or publishes audio while
+declaring `camera-audio: no`.
+
+For the player, open the page and run its assertions in the browser console:
+
+```js
+fetch('/selftest.js').then(r => r.text()).then(eval)
+```
+
+That checks the dropdown against `cameras.json`, and that a stored camera
+preference which is not a real camera falls back to the default instead of
+stranding the player on a path that 404s forever — including `constructor` and
+`toString`, which are truthy on any JavaScript object and would pass a naive
+check.
+
+## Configuration
+
+All via `environment:` in `docker-compose.yml`.
+
+### Container
+
+| Var | Default | Notes |
+|---|---|---|
+| `DEFAULT_CAMERA` | (first alphabetically) | Which camera the player opens on. Must match a `cameras.d/` filename without `.sh`. |
+| `START_TIMEOUT` | 15s | How long a cold pipeline gets to produce its first frame. |
+| `CLOSE_AFTER` | 10s | How long a pipeline lingers after the last viewer leaves. |
+
+### USB backend
+
+| Var | Default | Notes |
+|---|---|---|
+| `VIDEO_DEV` | /dev/video1 | Camera node |
+| `VIDEO_SIZE` | 640x480 | C250 max is VGA |
+| `FRAMERATE` | 30 | Drop to 15 to lighten CPU |
+| `INPUT_FORMAT` | mjpeg | Empty = let v4l2 negotiate |
+| `VBITRATE` | 1M | Video bitrate |
+| `AUDIO_RATE` | 16000 | Mic capture rate; resampled to 48k Opus |
+| `ABITRATE` | 64k | Opus bitrate |
+| `AUDIO_CARD` | (auto: USB) | Pin an ALSA card number |
+
+### CSI backend
+
+| Var | Default | Notes |
+|---|---|---|
+| `CSI_SENSOR_ID` | 0 | argus sensor index |
+| `CSI_SIZE` | 1280x720 | Must be a real IMX219 mode: 3264x2464@21, 1920x1080@30, 1640x1232@30 (native 4:3), 1280x720@60 |
+| `CSI_FRAMERATE` | 30 | Capped by the sensor mode |
+| `CSI_BITRATE` | 4000000 | **Bits per second, integer.** `nvv4l2h264enc` rejects `4M`. |
+
+Width and height are validated separately, so `1280x` and `x720` are rejected
+rather than reaching GStreamer as `height=` and restart-looping.
+
+## Device notes
+
+`/dev/video0` is the CSI camera, `/dev/video1` the USB one. Only the USB node is
+in `devices:` — **`/dev/video0` is deliberately not mapped in**, because
+`nvargus-daemon` on the host owns the sensor and `nvarguscamerasrc` reaches it
+through the bind-mounted `/tmp/argus_socket`.
+
+USB node numbers can move across reboots. To pin one:
 
 ```bash
-v4l2-ctl --list-devices        # if v4l-utils installed
-ls -l /dev/video*
-```
-
-On this Jetson, **`/dev/video0` is the onboard CSI camera (IMX219 Bayer)** and
-the **USB C250 is `/dev/video1`**. Only the C250 is set via `VIDEO_DEV` and
-mapped in `devices:`.
-
-**`/dev/video0` is deliberately *not* mapped into the container.** The CSI
-sensor is owned by `nvargus-daemon` on the host, and `nvarguscamerasrc` talks to
-that daemon over `/tmp/argus_socket` — which *is* bind-mounted. Mapping the
-device node as well would do nothing. This also means the CSI path depends on
-two host-side things: `nvargus-daemon` running, and `runtime: nvidia` so the
-Tegra userspace libs (`libargus`, `nvv4l2`) are mounted into the container.
-
-### Stable device naming (if the C250 moves to a different node)
-
-USB `/dev/video*` numbers can change across reboots/re-plugs. If the C250 stops
-being `/dev/video1`, either update `VIDEO_DEV` + the `devices:` mapping, or
-create a persistent symlink on the host via udev:
-
-```bash
-# Match the C250 by its USB IDs and pin a stable name.
 echo 'SUBSYSTEM=="video4linux", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0804", SYMLINK+="c250"' \
   | sudo tee /etc/udev/rules.d/99-c250.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Then set `VIDEO_DEV=/dev/c250` and map `"/dev/c250:/dev/c250"` in
-`docker-compose.yml`. (A camera exposes several video nodes; if `/dev/c250`
-points at a non-capture node, add `ATTR{index}=="0"` to the rule.)
+Then set `VIDEO_DEV=/dev/c250` and map it in `devices:`. (A camera exposes
+several nodes; add `ATTR{index}=="0"` if the symlink lands on a non-capture one.)
 
 ## Troubleshooting
 
-**Start here.** The smoke check forces each path to spawn its pipeline and
-asserts a video stream comes back:
+Start with the smoke check — it tells you which backend to chase.
 
-```bash
-docker exec webcam_home sh /smoke.sh usb csi
-```
+- **Logs:** `docker logs -f webcam_home`. The startup lines list every backend
+  that was configured.
+- **Inspect the generated config:** `docker exec webcam_home cat /etc/mediamtx.yml`
+- **Black page, no video:** confirm the camera enumerated — `ls /dev/video*` and
+  `arecord -l` on the host.
+- **Permission denied on a device:** the host user needs the `video` and `audio`
+  groups.
+- **CSI fails while USB works** — three distinct causes:
+  - `No such element "nvarguscamerasrc"` in the container: the nvidia runtime is
+    not mounting the Tegra libs. Check `runtime: nvidia` and
+    `docker info | grep -i runtime`.
+  - A GStreamer caps error: `CSI_SIZE` is not a real sensor mode.
+  - `/tmp/argus_socket` missing, or `nvargus-daemon` not active, on the **host**.
+  - **You restarted `nvargus-daemon`.** That replaces the socket's inode, which a
+    single-file bind mount cannot follow. Restart the container too.
 
-Healthy output is `usb  OK  [video audio ]` and `csi  OK  [video ]`. A path that
-reports `FAIL` tells you which camera to chase.
-
-- **Logs:** `docker logs -f webcam_home`
-- **Black page / no video:** confirm the C250 enumerated —
-  `ls /dev/video*` and `arecord -l` on the host.
-- **Permission denied on device:** ensure the host user is in the `video` and
-  `audio` groups, or as a last resort add `privileged: true` to the service in
-  `docker-compose.yml`.
-- **No audio:** check `arecord -l` shows the C250 as a capture card; verify the
-  log line `[start-ffmpeg] audio capture device: plughw:X,0`.
-- **Choppy video:** lower the load via `VIDEO_SIZE=640x480` / `FRAMERATE=15` or
-  reduce `VBITRATE` in `docker-compose.yml`.
-- **CSI path fails, USB fine —** three distinct causes, in order of likelihood:
-  - `No such element or plugin "nvarguscamerasrc"` inside the container: the
-    nvidia runtime is not mounting the Tegra libs. Check `runtime: nvidia` is in
-    `docker-compose.yml` and that `docker info | grep -i runtime` lists it.
-  - A GStreamer caps-negotiation error: `CSI_SIZE` is not a real IMX219 sensor
-    mode. Use one from the table below.
-  - `/tmp/argus_socket` missing, or `systemctl is-active nvargus-daemon` not
-    `active`, on the **host**. The USB camera is unaffected by either.
-  - **You restarted `nvargus-daemon` on the host.** That replaces the socket's
-    inode, and a single-file bind mount cannot follow it — the container is left
-    holding the old one. Restart the container too:
-    `docker restart webcam_home`.
-
-  Also worth checking once after a host reboot: `ls -l /tmp/argus_socket` should
-  be a socket (`s` in the mode). If Docker started before `nvargus-daemon`
-  created it, Docker will have made a *directory* at that path, which stops the
-  daemon binding and takes the CSI camera down host-wide until the directory is
-  removed.
-
-  Verify the whole chain on the host, outside Docker, to split host from
-  container:
+  Split host from container by running the pipeline on the host directly:
 
   ```bash
   gst-launch-1.0 -e nvarguscamerasrc num-buffers=30 ! nvvidconv ! nvv4l2h264enc \
     ! h264parse ! matroskamux ! filesink location=/tmp/csi.mkv
   ```
 
-## Tuning
+- **Choppy video:** lower `FRAMERATE` or `VBITRATE`. The software x264 path is
+  the expensive half.
 
-All via `environment:` in `docker-compose.yml`.
+## Known limitations
 
-### USB camera (C250)
+Stated plainly rather than left to be discovered:
 
-| Var            | Default     | Notes                                          |
-|----------------|-------------|------------------------------------------------|
-| `VIDEO_DEV`    | /dev/video1 | Camera node                                    |
-| `VIDEO_SIZE`   | 640x480     | C250 max is VGA                                |
-| `FRAMERATE`    | 30          | Drop to 15 to lighten CPU                      |
-| `INPUT_FORMAT` | mjpeg       | Empty = let v4l2 negotiate                     |
-| `VBITRATE`     | 1M          | Video bitrate                                  |
-| `AUDIO_RATE`   | 16000       | Mic capture rate (C250 supports 16000-48000). Resampled to 48k Opus. |
-| `ABITRATE`     | 64k         | Opus bitrate                                   |
-| `AUDIO_CARD`   | (auto: USB) | Pin a specific ALSA card number                |
+- **Pinned to JetPack 4.x / L4T R32.7.** The CSI backend depends on
+  `nvarguscamerasrc` and the argus socket, which is JetPack-specific. The USB and
+  test backends are portable; the container is not.
+- **The base image is Ubuntu bionic**, inherited from `l4t-base:r32.7.1`. Bionic's
+  arm64 archive is still served, but that is a clock — this project already had to
+  move off Debian bullseye when its package pool disappeared.
+- **No authentication on the streams.** Anyone who can reach port 8889 can watch,
+  and with on-demand capture can cause capture processes to start. Intended for a
+  LAN or a Tailscale tailnet, not the open internet.
+- **Audio is USB-only** here, for the hardware reason above.
+- Fast camera switching is verified manually, not by an automated test.
 
-### CSI camera (onboard IMX219)
+## Design notes
 
-| Var             | Default   | Notes                                                        |
-|-----------------|-----------|--------------------------------------------------------------|
-| `CSI_SENSOR_ID` | 0         | argus sensor index                                           |
-| `CSI_SIZE`      | 1280x720  | Must be a real IMX219 mode: 3264x2464@21, 1920x1080@30, 1640x1232@30 (native 4:3), 1280x720@60 |
-| `CSI_FRAMERATE` | 30        | Capped by the sensor mode above                              |
-| `CSI_BITRATE`   | 4000000   | **Bits per second as an integer.** `nvv4l2h264enc` rejects `4M`. |
+`docs/` carries the design document and the implementation plan this was built
+from, including the probe results that settled whether the single-container
+approach was viable at all, and the measured numbers quoted above.
 
-All four are validated at startup — width and height separately, so `1280x`
-and `x720` are rejected rather than reaching GStreamer as `height=` — along with
-the presence of the argus socket. A bad value exits with a readable message
-instead of a caps error on a restart loop.
+Worth a look if you want the reasoning rather than the result — including the
+bug that made it necessary to read SDP: MediaMTX answers a video-only path with
+an empty audio m-line carrying no `a=msid`, so `ontrack` fires a second time with
+`e.streams` empty. The original handler assigned `e.streams[0]` unconditionally
+and wrote `undefined` over the video stream it had just bound, giving a black
+player that reported "Live".
 
-### CPU cost
+## License
 
-Only the camera being watched encodes, so normally one encoder runs. Both run
-together in two cases: two viewers on *different* cameras, and for up to 10s
-after a switch while the previous pipeline lingers. Measured on this 4-core Nano:
-
-| State | Load average | USB x264 | CSI hw encode |
-|---|---|---|---|
-| Idle, no viewers | 0.34 | — | — |
-| A viewer on each camera | 1.07 | 66.3% of a core | 10.9% of a core |
-
-Comfortable, because the CSI path encodes in hardware. If it ever isn't, drop
-`FRAMERATE` for the USB path — that's the expensive half.
-
-### Check what the camera actually supports
-
-If video fails to start, list the formats/resolutions/framerates the USB camera
-really reports:
-
-```bash
-docker exec webcam_home ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video1
-```
-
-Then set `VIDEO_SIZE` / `FRAMERATE` / `INPUT_FORMAT` to a combination it reports,
-and redeploy. For the CSI camera the equivalent is the sensor-mode list in the
-table above — `nvarguscamerasrc` also prints the modes it supports when it
-starts, visible in `docker logs webcam_home`.
+MIT — see [LICENSE](LICENSE).
