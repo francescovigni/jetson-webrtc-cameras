@@ -32,6 +32,10 @@
       padding: .5rem .9rem; font-size: .9rem; cursor: pointer;
     }
     button.secondary { background: #2a2d36; }
+    select {
+      background: #2a2d36; color: #e7e9ee; border: 0; border-radius: 8px;
+      padding: .5rem .6rem; font-size: .9rem; cursor: pointer;
+    }
     button:active { transform: translateY(1px); }
     .dot { width: .6rem; height: .6rem; border-radius: 50%; background: #f0b429; }
     .dot.live { background: #2ec27e; }
@@ -52,6 +56,7 @@
   <div class="bar">
     <span id="dot" class="dot"></span>
     <span id="status" class="status">Connecting…</span>
+    <select id="cam" aria-label="Camera"></select>
     <button id="unmute">🔊 Unmute</button>
     <button id="reconnect" class="secondary">↻ Reconnect</button>
   </div>
@@ -59,8 +64,43 @@
   <script>
     // WHEP endpoint is derived from whatever host you browsed to (LAN IP or
     // Tailscale name), so the same page works on both without editing.
-    const STREAM   = "cam";
-    const WHEP_URL = `${location.protocol}//${location.hostname}:8889/${STREAM}/whep`;
+    // Two physically fixed cameras on this Jetson, so they are hardcoded — no
+    // discovery endpoint, and MediaMTX's API stays disabled.
+    const CAMS = { usb: "USB — C250 (with mic)", csi: "CSI — IMX219 (video only)" };
+    const DEFAULT_CAM = "usb";
+
+    // hasOwnProperty, not `CAMS[stored]`: a stored value of "constructor" or
+    // "toString" is truthy on any object and would strand the player on a path
+    // that 404s forever.
+    function resolveCam(stored) {
+      return Object.prototype.hasOwnProperty.call(CAMS, stored) ? stored : DEFAULT_CAM;
+    }
+
+    // localStorage can throw outright in a private window, so guard every access.
+    let storedCam = null;
+    try { storedCam = localStorage.getItem("cam"); } catch (_) {}
+    let cam = resolveCam(storedCam);
+
+    // Derived per connect(), not once: the camera changes at runtime. The host
+    // still comes from the page URL, so LAN and Tailscale both keep working.
+    const whepUrl = () => `${location.protocol}//${location.hostname}:8889/${cam}/whep`;
+
+    // Which MediaStream an ontrack event should bind, or null to leave the
+    // current one alone. MediaMTX answers a video-only path (the CSI camera)
+    // with an empty audio m-line that carries no a=msid, so ontrack fires a
+    // second time with e.streams empty. Assigning e.streams[0] there would
+    // clear the video stream bound a moment earlier and leave a black player
+    // reporting "Live".
+    function streamToBind(eventStreams, current) {
+      const stream = eventStreams[0];
+      if (!stream) return null;
+      return stream === current ? null : stream;
+    }
+
+    // Exposed for web/selftest.js.
+    window.__CAMS = CAMS;
+    window.__resolveCam = resolveCam;
+    window.__streamToBind = streamToBind;
 
     const video     = document.getElementById("video");
     const overlay   = document.getElementById("overlay");
@@ -114,6 +154,7 @@
     async function connect() {
       teardown();
       const myGen = ++generation;
+      window.__activeCam = cam;
       setStatus("Connecting…", "");
 
       // No STUN/TURN: LAN is direct and Tailscale is already a direct overlay.
@@ -124,7 +165,8 @@
 
       pc.ontrack = (e) => {
         if (myGen !== generation) return;
-        if (video.srcObject !== e.streams[0]) video.srcObject = e.streams[0];
+        const next = streamToBind(e.streams, video.srcObject);
+        if (next) video.srcObject = next;
       };
 
       pc.onconnectionstatechange = () => {
@@ -144,7 +186,7 @@
         await waitForIceGathering(pc);
         if (myGen !== generation) return;
 
-        const res = await fetch(WHEP_URL, {
+        const res = await fetch(whepUrl(), {
           method: "POST",
           headers: { "Content-Type": "application/sdp" },
           body: pc.localDescription.sdp,
@@ -160,6 +202,29 @@
         scheduleReconnect(3000);   // e.g. camera not ready yet after boot
       }
     }
+
+    const camSel = document.getElementById("cam");
+    for (const [value, label] of Object.entries(CAMS)) {
+      camSel.add(new Option(label, value, false, value === cam));
+    }
+
+    camSel.addEventListener("change", () => {
+      cam = camSel.value;
+      try { localStorage.setItem("cam", cam); } catch (_) {}
+      // connect() calls teardown() first, which bumps `generation` so any
+      // in-flight callback from the previous camera becomes a no-op. That is
+      // what makes fast repeated switching safe.
+      connect();
+    });
+
+    // The two cameras have different aspect ratios (4:3 and 16:9); let the stage
+    // follow the frame instead of letterboxing inside a hardcoded 4/3 box.
+    video.addEventListener("loadedmetadata", () => {
+      if (video.videoWidth && video.videoHeight) {
+        document.querySelector(".stage").style.aspectRatio =
+          `${video.videoWidth} / ${video.videoHeight}`;
+      }
+    });
 
     unmuteBtn.addEventListener("click", () => {
       video.muted = !video.muted;
