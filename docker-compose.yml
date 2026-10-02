@@ -18,6 +18,19 @@ services:
     # directly — no port mapping needed.
     network_mode: host
 
+    # Required for the CSI path: the nvidia runtime bind-mounts the Tegra
+    # userspace libs (libargus, nvv4l2) that nvarguscamerasrc and nvv4l2h264enc
+    # load. This host's Docker already defaults to the nvidia runtime, but say
+    # it so the file does not depend on daemon config. Compose schema 2.4 is
+    # kept precisely because v3 dropped this key.
+    runtime: nvidia
+
+    volumes:
+      # nvargus-daemon runs on the HOST and owns /dev/video0. The CSI camera is
+      # reached through this socket, which is why /dev/video0 is deliberately
+      # NOT in the devices list below.
+      - "/tmp/argus_socket:/tmp/argus_socket"
+
     # Hardware passthrough from the Jetson host.
     # NOTE: /dev/video0 is the Jetson's onboard CSI camera (IMX219 Bayer);
     # the USB C250 enumerates as /dev/video1. USB node numbers can shift on
