@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Webcam Home — Live</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 1rem;
+      background: #0e0f13; color: #e7e9ee;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
+    h1 { font-size: 1.1rem; font-weight: 600; margin: 0; letter-spacing: .02em; }
+    .stage {
+      position: relative; width: min(92vw, 860px); aspect-ratio: 4 / 3;
+      background: #000; border-radius: 12px; overflow: hidden;
+      box-shadow: 0 8px 40px rgba(0,0,0,.5);
+    }
+    video { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; }
+    .overlay {
+      position: absolute; inset: 0; display: flex; align-items: center;
+      justify-content: center; font-size: .95rem; color: #aab; pointer-events: none;
+      background: rgba(0,0,0,.35); transition: opacity .3s;
+    }
+    .overlay.hidden { opacity: 0; }
+    .bar { display: flex; gap: .6rem; align-items: center; }
+    button {
+      background: #2b6cff; color: #fff; border: 0; border-radius: 8px;
+      padding: .5rem .9rem; font-size: .9rem; cursor: pointer;
+    }
+    button.secondary { background: #2a2d36; }
+    button:active { transform: translateY(1px); }
+    .dot { width: .6rem; height: .6rem; border-radius: 50%; background: #f0b429; }
+    .dot.live { background: #2ec27e; }
+    .dot.down { background: #e5484d; }
+    .status { font-size: .85rem; color: #9aa; }
+  </style>
+</head>
+<body>
+  <h1>Webcam Home</h1>
+
+  <div class="stage">
+    <!-- One element plays both video + audio. Starts muted so autoplay is
+         allowed by browser policy; user clicks Unmute for sound. -->
+    <video id="video" autoplay playsinline muted></video>
+    <div id="overlay" class="overlay">Connecting…</div>
+  </div>
+
+  <div class="bar">
+    <span id="dot" class="dot"></span>
+    <span id="status" class="status">Connecting…</span>
+    <button id="unmute">🔊 Unmute</button>
+    <button id="reconnect" class="secondary">↻ Reconnect</button>
+  </div>
+
+  <script>
+    // WHEP endpoint is derived from whatever host you browsed to (LAN IP or
+    // Tailscale name), so the same page works on both without editing.
+    const STREAM   = "cam";
+    const WHEP_URL = `${location.protocol}//${location.hostname}:8889/${STREAM}/whep`;
+
+    const video     = document.getElementById("video");
+    const overlay   = document.getElementById("overlay");
+    const statusEl  = document.getElementById("status");
+    const dot       = document.getElementById("dot");
+    const unmuteBtn = document.getElementById("unmute");
+
+    let pc = null;
+    let generation = 0;        // invalidates stale callbacks after teardown
+    let retryTimer = null;
+
+    function setStatus(text, state) {
+      statusEl.textContent = text;
+      dot.className = "dot" + (state ? " " + state : "");
+      if (state === "live") {
+        overlay.classList.add("hidden");
+      } else {
+        overlay.textContent = text;
+        overlay.classList.remove("hidden");
+      }
+    }
+
+    function teardown() {
+      generation++;            // any in-flight handlers become no-ops
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+      video.srcObject = null;
+    }
+
+    function scheduleReconnect(delayMs) {
+      if (retryTimer) return;
+      setStatus("Reconnecting…", "");
+      retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delayMs);
+    }
+
+    async function waitForIceGathering(peer) {
+      if (peer.iceGatheringState === "complete") return;
+      await new Promise((resolve) => {
+        const done = () => {
+          if (peer.iceGatheringState === "complete") {
+            peer.removeEventListener("icegatheringstatechange", done);
+            resolve();
+          }
+        };
+        peer.addEventListener("icegatheringstatechange", done);
+        // Fallback: don't block forever if the last candidate is slow.
+        setTimeout(resolve, 2000);
+      });
+    }
+
+    async function connect() {
+      teardown();
+      const myGen = ++generation;
+      setStatus("Connecting…", "");
+
+      // No STUN/TURN: LAN is direct and Tailscale is already a direct overlay.
+      pc = new RTCPeerConnection({ iceServers: [] });
+
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+
+      pc.ontrack = (e) => {
+        if (myGen !== generation) return;
+        if (video.srcObject !== e.streams[0]) video.srcObject = e.streams[0];
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (myGen !== generation || !pc) return;
+        const s = pc.connectionState;
+        if (s === "connected") {
+          setStatus("Live", "live");
+        } else if (s === "failed" || s === "disconnected" || s === "closed") {
+          setStatus("Connection lost", "down");
+          scheduleReconnect(2000);
+        }
+      };
+
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitForIceGathering(pc);
+        if (myGen !== generation) return;
+
+        const res = await fetch(WHEP_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/sdp" },
+          body: pc.localDescription.sdp,
+        });
+        if (!res.ok) throw new Error(`WHEP ${res.status}`);
+
+        const answer = await res.text();
+        if (myGen !== generation) return;
+        await pc.setRemoteDescription({ type: "answer", sdp: answer });
+      } catch (err) {
+        if (myGen !== generation) return;
+        setStatus("Stream offline — retrying…", "down");
+        scheduleReconnect(3000);   // e.g. camera not ready yet after boot
+      }
+    }
+
+    unmuteBtn.addEventListener("click", () => {
+      video.muted = !video.muted;
+      unmuteBtn.textContent = video.muted ? "🔊 Unmute" : "🔇 Mute";
+      video.play().catch(() => {});
+    });
+
+    document.getElementById("reconnect").addEventListener("click", connect);
+
+    // Re-establish promptly when the tab becomes visible again.
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && (!pc || pc.connectionState !== "connected")) connect();
+    });
+
+    connect();
+  </script>
+</body>
+</html>

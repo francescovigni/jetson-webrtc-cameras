@@ -1,0 +1,5 @@
+# Holds a live Tailscale auth key. Never commit — see .env.example.
+.env
+
+# Local Claude Code settings.
+.claude/settings.local.json

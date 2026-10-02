@@ -1,0 +1,35 @@
+# MediaMTX configuration — minimal, only what we need.
+logLevel: info
+logDestinations: [stdout]
+
+# Disable everything we don't use to keep the surface small.
+api: no
+metrics: no
+pprof: no
+playback: no
+rtmp: no
+hls: no
+srt: no
+
+# Internal RTSP endpoint that FFmpeg publishes the camera into.
+# Not exposed in docker-compose; localhost only.
+rtsp: yes
+rtspAddress: :8554
+
+# WebRTC (WHEP) is what the browser consumes.
+webrtc: yes
+webrtcAddress: :8889
+# Single fixed UDP port for ICE so it's easy to expose / Tailscale-friendly.
+webrtcLocalUDPAddress: :8189
+# Gather host candidates from all interfaces (LAN + Tailscale) automatically.
+# No STUN/TURN needed: LAN is direct, Tailscale is already a direct overlay.
+
+paths:
+  # The one camera stream, reachable at: http://<host>:8889/cam/whep
+  cam:
+    # Start the capture pipeline as soon as MediaMTX boots and keep it
+    # running for the lifetime of the server. The USB device is opened
+    # exactly once — clients attaching/detaching never restart FFmpeg.
+    runOnInit: sh /start-ffmpeg.sh
+    # If FFmpeg ever exits (camera glitch, USB hiccup), restart it.
+    runOnInitRestart: yes

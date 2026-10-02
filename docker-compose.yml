@@ -1,0 +1,41 @@
+# Compose v2.4 schema: supported by both docker-compose v1 (common on
+# JetPack 4.x) and the modern `docker compose` plugin.
+version: "2.4"
+
+services:
+  webcam:
+    build: .
+    image: webcam_home:latest
+    container_name: webcam_home
+    restart: unless-stopped
+    # Reap zombie FFmpeg processes cleanly across restarts.
+    init: true
+
+    # Host networking is REQUIRED for WebRTC here: it lets MediaMTX advertise
+    # the Jetson's real LAN/Tailscale IP as its ICE candidate. With bridged
+    # networking it would advertise the container's internal 172.x address and
+    # clients could never connect. Host mode also exposes 8080/8889/8189
+    # directly — no port mapping needed.
+    network_mode: host
+
+    # Hardware passthrough from the Jetson host.
+    # NOTE: /dev/video0 is the Jetson's onboard CSI camera (IMX219 Bayer);
+    # the USB C250 enumerates as /dev/video1. USB node numbers can shift on
+    # re-plug/reboot — see README "Stable device naming" if it moves.
+    devices:
+      - "/dev/video1:/dev/video1"   # C250 video (UVC)
+      - "/dev/snd:/dev/snd"         # ALSA audio (C250 mic + any other cards)
+
+    # Grant access to the host audio/video device groups.
+    group_add:
+      - audio
+      - video
+
+    environment:
+      - VIDEO_DEV=/dev/video1     # the USB C250 (NOT video0 = onboard CSI cam)
+      - VIDEO_SIZE=640x480
+      - FRAMERATE=30
+      - INPUT_FORMAT=mjpeg        # C250 supports MJPEG at 640x480 (lighter on USB)
+      - VBITRATE=1M
+      # Uncomment to pin a specific ALSA capture card (see README):
+      # - AUDIO_CARD=2
